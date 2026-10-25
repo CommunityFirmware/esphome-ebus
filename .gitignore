@@ -1,0 +1,31 @@
+# ESPHome build output (per-config build dirs land next to the YAML)
+.esphome/
+
+# Private device configuration and credentials — never commit
+config/
+
+# Working notes and session artifacts
+.scratchpad/
+
+# ESPHome secrets (WiFi credentials, API keys) — never commit
+secrets.yaml
+
+# Python bytecode generated when ESPHome imports the local components
+__pycache__/
+*.py[cod]
+
+# Editor and virtualenv directories
+.zed/
+.vscode/
+.idea/
+.venv/
+venv/
+
+# Unit test binaries (tests/unit/run_tests.sh builds into tests/unit/build/)
+tests/unit/build/
+
+# Backup files and folders
+*.bak
+
+# macOS
+.DS_Store

@@ -1,0 +1,170 @@
+# Host-platform test configuration.
+#
+# Used by tests/host_test.py, which creates a PTY pair, symlinks the slave to
+# /tmp/ebus-test-pty and runs a Python VRC720 simulator on the master side.
+# The simulator echoes every byte (eBUS adapters echo the bus), ACKs requests
+# and answers B524 reads with canned register values.
+#
+# Build:  esphome compile examples/host-vrc720-test.yaml
+# Run:    python3 tests/host_test.py
+
+esphome:
+  name: vrc720-host-test
+  friendly_name: VRC720 Host Test
+
+host:
+
+external_components:
+  - source:
+      type: local
+      path: ../esphome/components
+    components: [ebus, vaillant_vrc720, vaillant_energy]
+
+# VERBOSE: entity state publishes are logged at verbose level
+# ('<name>' >> <value>), which the test harness asserts on.
+logger:
+  level: VERBOSE
+
+# eBUS UART over a PTY (2400 8N1). The test harness points this at a PTY slave.
+uart:
+  - id: ebus_uart
+    port: /tmp/ebus-test-pty
+    baud_rate: 2400
+    data_bits: 8
+    parity: NONE
+    stop_bits: 1
+
+ebus:
+  id: ebus_hub
+  uart_id: ebus_uart
+  address: 0x31
+
+vaillant_vrc720:
+  id: vrc720
+  ebus_id: ebus_hub
+  address: 0x15
+  update_interval: 5s
+
+vaillant_energy:
+  id: energy
+  ebus_id: ebus_hub
+  address: 0x15
+  update_interval: 5s
+
+sensor:
+  - platform: vaillant_vrc720
+    register: outdoor_temperature
+  - platform: vaillant_vrc720
+    register: flow_temperature
+  - platform: vaillant_vrc720
+    register: dhw_temperature
+  - platform: vaillant_vrc720
+    register: circuit_count_maximum
+  - platform: vaillant_vrc720
+    register: circuit_flow_temperature
+    circuit: 0
+  - platform: vaillant_vrc720
+    register: zone_room_temperature
+    zone: 0
+  - platform: vaillant_vrc720
+    register: regulator_room_temperature
+    device: 1
+  # B516 energy statistics (sub-command 0x10) and the candidate sub-ID 0x14
+  # current-electrical-power query. The daily window uses an explicit date so
+  # the test does not depend on a time source.
+  - platform: vaillant_energy
+    statistics:
+      source: electrical
+      usage: heating
+      period: total
+  - platform: vaillant_energy
+    statistics:
+      source: electrical
+      usage: dhw
+      period: total
+  - platform: vaillant_energy
+    statistics:
+      source: electrical
+      usage: heating
+      period: daily
+      date: "2026-10-22"
+  - platform: vaillant_energy
+    power: true
+
+binary_sensor:
+  - platform: vaillant_vrc720
+    register: maintenance_active
+  - platform: vaillant_vrc720
+    register: dhw_pump_active
+  - platform: vaillant_vrc720
+    register: zone_valve_position
+    zone: 0
+
+number:
+  - platform: vaillant_vrc720
+    id: dhw_setpoint
+    register: dhw_temperature_setpoint
+  - platform: vaillant_vrc720
+    id: zone_manual_setpoint
+    register: heating_zone_room_manual_temperature_setpoint
+    zone: 0
+
+select:
+  - platform: vaillant_vrc720
+    id: dhw_mode
+    register: dhw_operating_mode
+  - platform: vaillant_vrc720
+    id: zone_mode
+    register: heating_zone_operating_mode
+    zone: 0
+
+text_sensor:
+  - platform: vaillant_vrc720
+    register: date
+  - platform: vaillant_vrc720
+    register: zone_name
+    zone: 0
+  - platform: vaillant_vrc720
+    register: regulator_device_firmware_version
+    device: 1
+
+button:
+  - platform: vaillant_vrc720
+    id: dhw_boost
+    register: one_time_dhw_load
+  - platform: vaillant_vrc720
+    id: veto_cancel
+    register: quick_veto_cancel
+    zone: 0
+
+climate:
+  - platform: vaillant_vrc720
+    id: zone_climate
+    zone: 0
+    quick_veto_duration: 3
+  - platform: vaillant_vrc720
+    id: dhw_climate
+    dhw: true
+
+# Exercise the write path end-to-end: the simulator on the other end of the
+# PTY verifies the B524 write telegrams (OP=0x02 OT=0x01 GG II RR VALUE).
+interval:
+  - interval: 10s
+    then:
+      - number.set:
+          id: dhw_setpoint
+          value: 52.0
+      - select.set:
+          id: dhw_mode
+          option: "manual"
+      - button.press:
+          id: dhw_boost
+      - climate.control:
+          id: zone_climate
+          preset: "boost"
+      - climate.control:
+          id: zone_climate
+          preset: "none"
+      - climate.control:
+          id: dhw_climate
+          preset: "boost"

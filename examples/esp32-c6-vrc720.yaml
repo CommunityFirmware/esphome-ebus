@@ -1,0 +1,276 @@
+# Example configuration for the eBUS Adapter Shield C6 (ESP32-C6).
+#
+# Replaces the closed-source adapter firmware with an ESPHome-based one that
+# controls and monitors a Vaillant VRC 720 system regulator over eBUS.
+#
+# Hardware: https://adapter.ebusd.eu/v5-c6/index.en
+#   - eBUS UART: 2400 baud; the shield's front-end regenerates the signal
+#     without the parity bit, so the ESP32 UART must run 8N1 (see below)
+#   - pins: hardwired to the shield's eBUS transceiver (official I/O pinout:
+#     IO15 = eBUS TX, IO14 = eBUS RX)
+#
+# Template only: it references credentials via !secret. To use it, copy it to
+# config/ (excluded from Git) and create config/secrets.yaml with:
+#   wifi_ssid: "..."
+#   wifi_password: "..."
+#
+# Build:  esphome compile config/esp32-c6-vrc720.yaml
+# Flash:  esphome upload config/esp32-c6-vrc720.yaml
+
+esphome:
+  name: vrc720-ebus-adapter
+  friendly_name: VRC720 eBUS Adapter
+
+esp32:
+  # The eBUS Adapter Shield C6 uses an ESP32-C6-MINI-1 module (4 MB flash);
+  # esp32-c6-devkitm-1 is the matching board definition.
+  board: esp32-c6-devkitm-1
+  variant: esp32c6
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: ../esphome/components
+    components: [ebus, vaillant_vrc720, vaillant_energy]
+
+logger:
+  level: DEBUG
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+# Wired Ethernet alternative: USR-ES1 module (W5500 chip) on W1+USRL.
+# Pinout from the official I/O table (adapter.ebusd.eu/v5-c6, "Ethernet"
+# column); MISO depends on the PCB version: 2.44+ uses GPIO21, older 2.x PCBs
+# use GPIO0 (this board is PCB v2.34). Disable wifi above when using it.
+# ethernet:
+#   type: W5500
+#   clk_pin: GPIO3
+#   mosi_pin: GPIO2
+#   miso_pin: GPIO0
+#   cs_pin: GPIO18
+#   interrupt_pin: GPIO19
+#   reset_pin: GPIO1
+
+# eBUS UART on the adapter shield. The shield's eBUS transceiver is hardwired
+# to GPIO15 (TX) / GPIO14 (RX) — see the I/O pinout at
+# https://adapter.ebusd.eu/v5-c6/index.en.html#io
+uart:
+  - id: ebus_uart
+    # The eAS C6 front-end inverts TX once (ADuM5211 channel -> pull-down
+    # stage): a standard UART idle-high TXD holds the eBUS at the low level
+    # (~9V) and blocks the whole bus. Invert TXD so idle = bus released.
+    tx_pin:
+      number: GPIO15
+      inverted: true
+    # RX is inverted too (same single-inverting front-end): bus idle 24V
+    # reads LOW on GPIO14. Without this the UART decodes inverted garbage.
+    rx_pin:
+      number: GPIO14
+      inverted: true
+    baud_rate: 2400
+    data_bits: 8
+    # The eAS C6 front-end delivers 10-bit frames (no parity bit) to GPIO14,
+    # so the UART must run 8N1; with 8E1 the parity/framing errors desync it
+    # mid-byte (garbage).
+    parity: NONE
+    stop_bits: 1
+
+# eBUS transport hub. The initiator address must have both nibbles in
+# {0x0, 0x1, 0x3, 0x7, 0xF}; 0x31 is a common choice.
+# listen_only: true is a bring-up/debug mode: the hub never transmits and only
+# passively decodes bus traffic.
+# arbitration_delay (µs, 0-620, default 200) yields the start of a bus-free
+# phase to competing initiators; it cut our arbitration retries from ~30% to
+# ~3% on a busy bus.
+ebus:
+  id: ebus_hub
+  uart_id: ebus_uart
+  address: 0x31
+  listen_only: false
+  # Drive the shield's RGB LED (GPIO23) as a bus status indicator:
+  # green = bus traffic seen recently, red = bus silent (not connected or
+  # stuck), blue = listen-only mode.
+  status_led: ebus_status_led
+
+# Vaillant VRC 720 system regulator (default slave address 0x15).
+vaillant_vrc720:
+  id: vrc720
+  ebus_id: ebus_hub
+  address: 0x15
+  update_interval: 30s
+
+# Time source for "daily" B516 energy statistics windows (today's date).
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+
+# Vaillant B516 energy statistics (PB=0xB5 SB=0x16) on the regulator.
+vaillant_energy:
+  id: energy
+  ebus_id: ebus_hub
+  address: 0x15
+  time_id: homeassistant_time
+  update_interval: 60s
+
+# ---- light (status LED) -----------------------------------------------------
+# The adapter shield's RGB LED is a single addressable WS2812 LED on GPIO23.
+# Internal: the eBUS hub owns it; it is not exposed to Home Assistant. If the
+# colors look swapped on your PCB, adjust channel_colors (or try chipset:
+# SK6812).
+light:
+  - platform: esp32_rmt_led_strip
+    id: ebus_status_led
+    internal: true
+    pin: GPIO23
+    num_leds: 1
+    chipset: WS2812
+    channel_colors: GRB
+
+# ---- sensors ---------------------------------------------------------------
+sensor:
+  - platform: vaillant_vrc720
+    register: outdoor_temperature
+  - platform: vaillant_vrc720
+    register: flow_temperature
+  - platform: vaillant_vrc720
+    register: water_pressure
+  - platform: vaillant_vrc720
+    register: dhw_temperature
+  - platform: vaillant_vrc720
+    register: dhw_cylinder_top_temperature
+  - platform: vaillant_vrc720
+    register: heating_fuel_consumption_total
+  - platform: vaillant_vrc720
+    register: priority_error_code
+  # OP=0x00 system information
+  - platform: vaillant_vrc720
+    register: circuit_count_maximum
+  - platform: vaillant_vrc720
+    register: zone_count_maximum
+  # instanced: heating circuit 1 (YAML circuit: 0)
+  - platform: vaillant_vrc720
+    register: circuit_flow_temperature
+    circuit: 0
+  - platform: vaillant_vrc720
+    register: circuit_room_humidity
+    circuit: 0
+  # instanced: zone 1 (YAML zone: 0)
+  - platform: vaillant_vrc720
+    register: zone_room_temperature
+    zone: 0
+  # instanced: remote device slot 1 (regulator/thermostat/VR71)
+  - platform: vaillant_vrc720
+    register: regulator_room_temperature
+    device: 1
+  - platform: vaillant_vrc720
+    register: thermostat_room_humidity
+    device: 2
+  # B516 energy statistics (sub-command 0x10, watt-hours on the wire,
+  # published in kWh). "total" is an all-time counter that ignores the date
+  # and is ready for the HA energy dashboard (state_class: total_increasing);
+  # "daily" windows depend on the regulator's own clock being correct.
+  - platform: vaillant_energy
+    statistics:
+      source: electrical
+      usage: heating
+      period: total
+  - platform: vaillant_energy
+    statistics:
+      source: electrical
+      usage: dhw
+      period: total
+  # B516 sub-ID 0x14 "current electrical power" (candidate, unit unconfirmed
+  # on the wire): sent to the heat pump at 0x08. If it never answers, the
+  # sensor stays unknown and the query is retried each cycle.
+  - platform: vaillant_energy
+    power: true
+    address: 0x08
+
+# ---- binary sensors --------------------------------------------------------
+binary_sensor:
+  - platform: vaillant_vrc720
+    register: maintenance_active
+  - platform: vaillant_vrc720
+    register: dhw_pump_active
+  - platform: vaillant_vrc720
+    register: outdoor_temperature_sensor_ok
+  - platform: vaillant_vrc720
+    register: zone_valve_position
+    zone: 0
+  - platform: vaillant_vrc720
+    register: regulator_device_connected
+    device: 1
+
+# ---- numbers (writable setpoints) ------------------------------------------
+number:
+  - platform: vaillant_vrc720
+    register: dhw_temperature_setpoint
+  - platform: vaillant_vrc720
+    register: continuous_heating_outdoor_temperature_limit
+  - platform: vaillant_vrc720
+    register: circuit_heating_curve_factor
+    circuit: 0
+  - platform: vaillant_vrc720
+    register: heating_zone_room_manual_temperature_setpoint
+    zone: 0
+  - platform: vaillant_vrc720
+    register: zone_enabled
+    zone: 0
+
+# ---- selects (writable operating modes) ------------------------------------
+select:
+  - platform: vaillant_vrc720
+    register: dhw_operating_mode
+  - platform: vaillant_vrc720
+    register: heating_zone_operating_mode
+    zone: 0
+  - platform: vaillant_vrc720
+    register: circuit_type
+    circuit: 0
+  - platform: vaillant_vrc720
+    register: zone_special_function_mode
+    zone: 0
+
+# ---- text sensors ----------------------------------------------------------
+text_sensor:
+  - platform: vaillant_vrc720
+    register: date
+  - platform: vaillant_vrc720
+    register: clock_time
+  - platform: vaillant_vrc720
+    register: zone_name
+    zone: 0
+  - platform: vaillant_vrc720
+    register: regulator_device_firmware_version
+    device: 1
+
+# ---- buttons (commands) ----------------------------------------------------
+button:
+  - platform: vaillant_vrc720
+    register: one_time_dhw_load
+  - platform: vaillant_vrc720
+    register: holiday_abort
+  - platform: vaillant_vrc720
+    register: quick_veto_cancel
+    zone: 0
+
+# ---- climate (composed entities) -------------------------------------------
+# Zone climate: current/target temperature, humidity, operating mode
+# (off/time-controlled/manual) and quick veto as the BOOST preset.
+# DHW climate: temperatures, operating mode, loading action and the one-time
+# tank load as the BOOST preset.
+climate:
+  - platform: vaillant_vrc720
+    zone: 0
+    quick_veto_duration: 3  # hours
+  - platform: vaillant_vrc720
+    dhw: true

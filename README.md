@@ -326,3 +326,7 @@ esphome upload config/esp32-c6-vrc720.yaml
   <https://github.com/Project-Helianthus/helianthus-docs-ebus>
   (`protocols/ebus-services/`, `protocols/vaillant/`)
 - eBUS Adapter Shield C6: <https://adapter.ebusd.eu/v5-c6/index.en>
+
+## Disclaimer
+
+This is an unofficial implementation and in no way affiliated with Vaillant GmbH.
